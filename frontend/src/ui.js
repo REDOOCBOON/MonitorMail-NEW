@@ -213,6 +213,9 @@ export const AuthShell = ({ children }) => (
             <Box sx={{ width: '100%', maxWidth: 400 }}>
                 <Box sx={{ display: { xs: 'block', md: 'none' }, mb: 4 }}><Logo /></Box>
                 {children}
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', textAlign: 'center', mt: 4 }}>
+                    <Link href="/privacy.html" sx={{ color: 'inherit' }}>Privacy Policy</Link> · <Link href="/terms.html" sx={{ color: 'inherit' }}>Terms</Link>
+                </Typography>
             </Box>
         </Box>
     </Box>

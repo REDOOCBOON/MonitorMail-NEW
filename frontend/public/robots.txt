@@ -1,2 +1,4 @@
 User-agent: *
+Allow: /privacy.html
+Allow: /terms.html
 Disallow: /
