@@ -11,8 +11,13 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 
+import base64
+import json
 import os
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -44,6 +49,29 @@ class _IPv4SMTP_SSL(smtplib.SMTP_SSL):
     def _get_socket(self, host, port, timeout):
         sock = socket.create_connection((_ipv4_address(host), port), timeout, self.source_address)
         return self.context.wrap_socket(sock, server_hostname=host)
+
+
+def build_message(sender_email, to_email, subject, body_html, cc_email=None, attachment_data=None, attachment_filename=None):
+    """Build the MIME message. Returns (message, [recipients])."""
+    # Header values must be single-line: stops header injection (e.g. a Bcc smuggled into the subject)
+    to_email = _single_line(to_email)
+    cc_email = _single_line(cc_email) if cc_email else None
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = to_email
+    if cc_email:
+        msg['Cc'] = cc_email
+    msg['Subject'] = _single_line(subject)[:250]
+    msg.attach(MIMEText(body_html, 'html'))
+    if attachment_data and attachment_filename:
+        part = MIMEBase('application', 'octet-stream')
+        part.set_payload(attachment_data)
+        encoders.encode_base64(part)
+        safe_name = re.sub(r'[^A-Za-z0-9._ -]', '_', os.path.basename(attachment_filename))[:120] or 'attachment'
+        part.add_header('Content-Disposition', 'attachment', filename=safe_name)
+        msg.attach(part)
+    recipients = [to_email] + ([cc_email] if cc_email and cc_email != to_email else [])
+    return msg, recipients
 
 
 class EmailSender:
@@ -117,118 +145,19 @@ class EmailSender:
         self.server = None
 
     def send_email(self, to_email, subject, body_html, cc_email=None, attachment_data=None, attachment_filename=None):
-        """
-        Send a single email with optional attachment.
-        
-        Args:
-            to_email: Recipient email address
-            subject: Email subject
-            body_html: HTML email body
-            cc_email: CC recipient (optional)
-            attachment_data: Binary attachment data (optional)
-            attachment_filename: Attachment filename (optional)
-        
-        Returns:
-            tuple: (success: bool, message: str)
-        """
+        """Send one email. Returns (success: bool, message: str)."""
         try:
-            # Header values must be single-line: stops header injection (e.g. a Bcc smuggled into the subject)
-            to_email = _single_line(to_email)
-            cc_email = _single_line(cc_email) if cc_email else None
-            subject = _single_line(subject)[:250]
-            msg = MIMEMultipart()
-            msg['From'] = self.sender_email
-            msg['To'] = to_email
-            if cc_email:
-                msg['Cc'] = cc_email
-            msg['Subject'] = subject
-            
-            # Attach HTML body
-            msg.attach(MIMEText(body_html, 'html'))
-            
-            # Attach file if provided
-            if attachment_data and attachment_filename:
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(attachment_data)
-                encoders.encode_base64(part)
-                safe_name = re.sub(r'[^A-Za-z0-9._ -]', '_', os.path.basename(attachment_filename))[:120] or 'attachment'
-                part.add_header('Content-Disposition', 'attachment', filename=safe_name)
-                msg.attach(part)
-            
-            # Determine recipients
-            recipients = [to_email]
-            if cc_email and cc_email not in recipients:
-                recipients.append(cc_email)
-            
-            # Send email
+            msg, recipients = build_message(self.sender_email, to_email, subject, body_html, cc_email, attachment_data, attachment_filename)
             self.server.sendmail(self.sender_email, recipients, msg.as_string())
-            logger.info(f"✅ Email sent to {to_email}")
+            logger.info(f"✅ Email sent to {recipients[0]}")
             return True, "Email sent successfully"
-            
         except smtplib.SMTPException as e:
-            error_msg = f"SMTP error: {e}"
-            logger.error(f"❌ {error_msg}")
-            return False, error_msg
+            logger.error(f"❌ SMTP error: {e}")
+            return False, f"SMTP error: {e}"
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"❌ Unexpected error sending email: {error_msg}")
-            return False, error_msg
-    
-    def send_emails_batch(self, email_list, subject, body_html, attachment_data=None, attachment_filename=None):
-        """
-        Send emails to multiple recipients.
-        
-        Args:
-            email_list: List of dicts with 'to', 'cc' (optional), 'name' keys
-            subject: Email subject
-            body_html: HTML email body
-            attachment_data: Binary attachment data (optional)
-            attachment_filename: Attachment filename (optional)
-        
-        Returns:
-            list: Results for each email
-        """
-        results = []
-        
-        for idx, email_info in enumerate(email_list, 1):
-            try:
-                to_email = email_info.get('to')
-                cc_email = email_info.get('cc')
-                
-                if not to_email or '@' not in to_email:
-                    results.append({
-                        'email': to_email or 'Unknown',
-                        'status': 'failed',
-                        'reason': 'Invalid email address'
-                    })
-                    continue
-                
-                success, msg = self.send_email(
-                    to_email=to_email,
-                    subject=subject,
-                    body_html=body_html,
-                    cc_email=cc_email,
-                    attachment_data=attachment_data,
-                    attachment_filename=attachment_filename
-                )
-                
-                results.append({
-                    'email': to_email,
-                    'status': 'success' if success else 'failed',
-                    'reason': msg if not success else None
-                })
-                
-            except Exception as e:
-                results.append({
-                    'email': email_info.get('to', 'Unknown'),
-                    'status': 'failed',
-                    'reason': str(e)
-                })
-            
-            logger.info(f"Progress: {idx}/{len(email_list)}")
-        
-        return results
-    
+            logger.error(f"❌ Unexpected error sending email: {e}")
+            return False, "Unexpected error while sending"
+
     def logout(self):
         """Safely close SMTP connection."""
         try:
@@ -254,3 +183,84 @@ class EmailSender:
         """Context manager exit."""
         self.logout()
         return False
+
+
+# --- Gmail API (HTTPS) sender: works where SMTP ports are blocked, e.g. free cloud hosting ---
+GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
+GMAIL_SEND_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send'
+
+
+class GmailAuthError(Exception):
+    """The teacher's Google permission was revoked or expired; they must connect Gmail again."""
+
+
+def http_json(url, form=None, body=None, token=None, method='POST', timeout=20):
+    """Minimal HTTPS JSON client. Returns (status, parsed_json)."""
+    headers = {'Accept': 'application/json'}
+    data = None
+    if form is not None:
+        data = urllib.parse.urlencode(form).encode()
+        headers['Content-Type'] = 'application/x-www-form-urlencoded'
+    elif body is not None:
+        data = json.dumps(body).encode()
+        headers['Content-Type'] = 'application/json'
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            return response.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw) if raw else {}
+        except ValueError:
+            return e.code, {}
+
+
+class GmailApiSender:
+    """Same interface as EmailSender, but sends through the Gmail API using the teacher's OAuth permission."""
+
+    def __init__(self, sender_email, refresh_token, client_id, client_secret, timeout=20):
+        self.sender_email = sender_email
+        self.refresh_token = refresh_token
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.timeout = timeout
+        self.access_token = None
+
+    def connect(self):
+        status, data = http_json(GOOGLE_TOKEN_URL, form={
+            'grant_type': 'refresh_token', 'refresh_token': self.refresh_token,
+            'client_id': self.client_id, 'client_secret': self.client_secret,
+        }, timeout=self.timeout)
+        if status == 200 and data.get('access_token'):
+            self.access_token = data['access_token']
+            return True
+        if data.get('error') in ('invalid_grant', 'unauthorized_client'):
+            raise GmailAuthError(data.get('error_description') or data['error'])
+        raise ConnectionError(f"Google token endpoint returned {status}")
+
+    def send_email(self, to_email, subject, body_html, cc_email=None, attachment_data=None, attachment_filename=None):
+        try:
+            msg, recipients = build_message(self.sender_email, to_email, subject, body_html, cc_email, attachment_data, attachment_filename)
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            status, data = http_json(GMAIL_SEND_URL, body={'raw': raw}, token=self.access_token, timeout=self.timeout)
+            if status == 401:  # access token expired mid-run: refresh once and retry
+                self.connect()
+                status, data = http_json(GMAIL_SEND_URL, body={'raw': raw}, token=self.access_token, timeout=self.timeout)
+            if 200 <= status < 300:
+                logger.info(f"✅ Email sent via Gmail API to {recipients[0]}")
+                return True, "Email sent successfully"
+            reason = (data.get('error') or {}).get('message', f'HTTP {status}') if isinstance(data.get('error'), dict) else f'HTTP {status}'
+            logger.error(f"❌ Gmail API error: {reason}")
+            return False, f"Gmail refused the email: {reason}"
+        except GmailAuthError:
+            return False, 'Gmail permission expired. Please connect Gmail again.'
+        except Exception as e:
+            logger.error(f"❌ Gmail API send failed: {type(e).__name__}: {e}")
+            return False, "Could not reach Gmail. Please try again."
+
+    def logout(self):
+        self.access_token = None

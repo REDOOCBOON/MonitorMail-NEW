@@ -46,9 +46,12 @@ Prerequisites: Python 3.9+, Node 18+, PostgreSQL running locally.
 
 The repo includes a `Dockerfile` (builds the React app, then runs the Python server that serves both the app and the API) and a `render.yaml` blueprint.
 
-1. Create a PostgreSQL database (e.g. Neon) and copy your data: `pg_dump --no-owner <local db> | psql "<cloud connection string>"`.
-2. In Render: **New → Blueprint**, pick this repo, and fill in `DATABASE_URL`, `ADMIN_EMAIL`, `SYSTEM_EMAIL`, `SYSTEM_EMAIL_APP_PASSWORD` and `FRONTEND_ORIGIN` (your `https://….onrender.com` URL). `SECRET_KEY` is generated for you.
-3. Use a paid instance: free instances can't send email over SMTP.
+1. Create a PostgreSQL database (e.g. Neon, free) and copy your data: `pg_dump --no-owner <local db> | psql "<cloud connection string>"`.
+2. Create a Google OAuth client (Google Cloud Console → Gmail API + OAuth consent screen + Credentials → *Web application*) with redirect URI `https://<your-app>.onrender.com/api/google/callback`.
+3. In Render: **New → Blueprint** (or a Docker web service, Free plan), and set `DATABASE_URL`, `ADMIN_EMAIL`, `SYSTEM_EMAIL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `FRONTEND_ORIGIN` (your `https://….onrender.com` URL). `SECRET_KEY` is generated for you.
+4. Sign in as the admin and click **Connect Gmail** (Account page) so OTP and approval emails can be sent.
+
+Free hosts block SMTP, so on Render email goes through the Gmail API (HTTPS) using each teacher's connected Gmail. App passwords (SMTP) still work when running locally.
 
 Health check: `GET /api/health`.
 
@@ -80,7 +83,7 @@ Teachers added by the admin in **Teacher Management** are approved immediately.
 
 1. **Low Attendance** page → drop the PDF. The report is read table-by-table; theory subjects keep their slot (e.g. `21CSC303J(B)`) and lab slots are labelled `(Lab)`, so both parts of a course are shown separately.
 2. Students below 75% are listed with their low subjects and emails from the database. Students missing from the database are highlighted; add their emails in the review window (and **Save to DB**).
-3. **Review & send** → enter your Gmail app password (for the account you signed in with; create one at https://myaccount.google.com/apppasswords). It is kept in memory until you log out.
+3. **Review & send** → **Connect Gmail** once (send-only permission; emails come from your own address). Without Google sign-in configured, enter a Gmail app password instead (kept in memory until you sign out).
 4. Pick a template (placeholders `[Student Name]`, `[Subject List]`), edit any email, then **Send all emails**. Each student card shows Sent/Failed; retrying only resends the ones that didn't go out.
 
 ## Other features

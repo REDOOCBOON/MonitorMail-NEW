@@ -110,6 +110,55 @@ const passwordProblem = (password) => {
     return null;
 };
 
+// Connect / disconnect the teacher's Gmail (used when the server has Google sign-in configured)
+const GmailConnectPanel = ({ status, onChanged, disabled }) => {
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
+    const connect = async () => {
+        setBusy(true); setError('');
+        try {
+            const { url } = await api.startGmailConnect();
+            window.location.assign(url); // Google's consent screen, then back to MonitorMail
+        } catch (err) { setError(err.message); setBusy(false); }
+    };
+    const disconnect = async () => {
+        setBusy(true); setError('');
+        try { await api.disconnectGmail(); onChanged?.(); }
+        catch (err) { setError(err.message); }
+        finally { setBusy(false); }
+    };
+    if (status?.connected) {
+        return (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap', p: 1.5, borderRadius: 2, border: `1px solid ${alpha(tokens.accent, 0.3)}`, backgroundColor: alpha(tokens.accent, 0.06) }}>
+                <CheckIcon sx={{ color: tokens.accent }} fontSize="small" />
+                <Typography variant="body2" sx={{ flexGrow: 1 }}>Sending as <strong>{status.google_email}</strong> via your connected Gmail</Typography>
+                <BusyButton size="small" onClick={disconnect} loading={busy} disabled={disabled}>Disconnect</BusyButton>
+                {error && <Typography variant="caption" sx={{ width: '100%', color: tokens.danger }}>{error}</Typography>}
+            </Box>
+        );
+    }
+    return (
+        <Box sx={{ p: 1.5, borderRadius: 2, border: `1px solid ${tokens.borderStrong}`, backgroundColor: tokens.surfaceRaised }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+                <MailOutlineIcon fontSize="small" sx={{ color: tokens.textMuted }} />
+                <Typography variant="body2" sx={{ flexGrow: 1 }}>Connect your Gmail once to send emails from your own address.</Typography>
+                <BusyButton size="small" variant="contained" onClick={connect} loading={busy} loadingText="Opening Google…" disabled={disabled}>Connect Gmail</BusyButton>
+            </Box>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                MonitorMail only gets permission to <em>send</em> email, not to read it. If Google shows "Google hasn't verified this app", click <strong>Advanced → Go to MonitorMail</strong>.
+            </Typography>
+            {error && <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: tokens.danger }}>{error}</Typography>}
+        </Box>
+    );
+};
+
+// Gmail connection when available on the server, otherwise the app-password field (local/SMTP setups)
+const SendingAccountField = ({ gmailStatus, onGmailChanged, value, onChange, disabled, senderEmail }) => (
+    gmailStatus?.configured
+        ? <GmailConnectPanel status={gmailStatus} onChanged={onGmailChanged} disabled={disabled} />
+        : <GmailAppPasswordField value={value} onChange={onChange} disabled={disabled} senderEmail={senderEmail} />
+);
+
 const AuthHeading = ({ title, subtitle }) => (
     <Box sx={{ mb: 3 }}>
         <Typography variant="h5" component="h1">{title}</Typography>
@@ -388,7 +437,9 @@ const massAlertModalStyle = { ...modalBaseStyle, width: 'calc(100% - 32px)', max
 // --- EmailModal (for Workflow) ---
 const DEFAULT_BODY = 'Dear [Student Name],\n\nThis is to inform you that your attendance is below the required 75% in the following subject(s):\n\n[Subject List]\n\nPlease attend all classes regularly and meet your Faculty Advisor if you have any concerns.\n\nRegards,\nFaculty Advisor';
 
-const EmailModal = ({ open, onClose, data, onSendAll, onSendSingle, loading, templates, title, setDisplayData, setSnackbar, user, gmailAppPassword, setGmailAppPassword }) => {
+const EmailModal = ({ open, onClose, data, onSendAll, onSendSingle, loading, templates, title, setDisplayData, setSnackbar, user, gmailAppPassword, setGmailAppPassword, gmailStatus, onGmailChanged }) => {
+    const canSend = Boolean(gmailStatus?.connected || gmailAppPassword.trim());
+    const cantSendMessage = gmailStatus?.configured ? 'Please connect your Gmail first' : 'Please enter your Gmail app password';
     const [emailBodies, setEmailBodies] = useState({});
     const [emailSubject, setEmailSubject] = useState(DEFAULT_EMAIL_SUBJECT);
     const [attachment, setAttachment] = useState(null);
@@ -473,8 +524,8 @@ const EmailModal = ({ open, onClose, data, onSendAll, onSendSingle, loading, tem
     const hasRecipient = (student) => Boolean((student.student_email || '').trim() || (student.parent_email || '').trim());
 
     const handleSendAll = async () => {
-        if (!gmailAppPassword.trim()) {
-            setSnackbar({ open: true, message: 'Please enter your Gmail app password', severity: 'error' });
+        if (!canSend) {
+            setSnackbar({ open: true, message: cantSendMessage, severity: 'error' });
             return;
         }
         // Skip students already sent in this session (e.g. when retrying after failures)
@@ -502,8 +553,8 @@ const EmailModal = ({ open, onClose, data, onSendAll, onSendSingle, loading, tem
 
     const handleSendSingle = async (student) => {
         if(!student || !student.reg_no) return;
-        if (!gmailAppPassword.trim()) {
-            setSnackbar({ open: true, message: 'Please enter your Gmail app password', severity: 'error' });
+        if (!canSend) {
+            setSnackbar({ open: true, message: cantSendMessage, severity: 'error' });
             return;
         }
         setSingleSendLoading(student.reg_no);
@@ -540,7 +591,7 @@ const EmailModal = ({ open, onClose, data, onSendAll, onSendSingle, loading, tem
 
                     <Grid container spacing={2} sx={{ mb: 2 }}>
                         <Grid size={{ xs: 12, md: 6 }}>
-                            <GmailAppPasswordField value={gmailAppPassword} onChange={setGmailAppPassword} disabled={isSendingAll} senderEmail={user?.email} />
+                            <SendingAccountField gmailStatus={gmailStatus} onGmailChanged={onGmailChanged} value={gmailAppPassword} onChange={setGmailAppPassword} disabled={isSendingAll} senderEmail={user?.email} />
                         </Grid>
                         <Grid size={{ xs: 12, md: 6 }}>
                             <FormControl fullWidth size="small" sx={{ mb: 2 }}>
@@ -675,7 +726,7 @@ const EmailModal = ({ open, onClose, data, onSendAll, onSendSingle, loading, tem
                         {attachment && <Typography variant="body2" noWrap sx={{maxWidth: '200px'}}>{attachment.name}</Typography>}
                         <Box flexGrow={1} />
                         {sentCount > 0 && !isSendingAll && <Button variant="outlined" onClick={onClose}>Done</Button>}
-                        <BusyButton onClick={handleSendAll} variant="contained" startIcon={<SendIcon />} loading={isSendingAll} loadingText="Sending…" disabled={loading || !gmailAppPassword.trim() || filteredData.length === 0}>
+                        <BusyButton onClick={handleSendAll} variant="contained" startIcon={<SendIcon />} loading={isSendingAll} loadingText="Sending…" disabled={loading || !canSend || filteredData.length === 0}>
                             {failedCount > 0 ? 'Retry failed / unsent' : 'Send all emails'}
                         </BusyButton>
                     </Box>
@@ -686,7 +737,8 @@ const EmailModal = ({ open, onClose, data, onSendAll, onSendSingle, loading, tem
 };
 
 // --- Mass Alert Modal ---
-const MassAlertModal = ({ open, onClose, onSend, loading, templates, user, gmailAppPassword, setGmailAppPassword }) => {
+const MassAlertModal = ({ open, onClose, onSend, loading, templates, user, gmailAppPassword, setGmailAppPassword, gmailStatus, onGmailChanged }) => {
+    const canSend = Boolean(gmailStatus?.connected || gmailAppPassword.trim());
     const [subject, setSubject] = useState('');
     const [body, setBody] = useState('');
     const [attachment, setAttachment] = useState(null);
@@ -726,7 +778,7 @@ const MassAlertModal = ({ open, onClose, onSend, loading, templates, user, gmail
                     </Box>
                     <Grid container spacing={2}>
                         <Grid size={{ xs: 12 }}>
-                            <GmailAppPasswordField value={gmailAppPassword} onChange={setGmailAppPassword} disabled={loading} senderEmail={user?.email} />
+                            <SendingAccountField gmailStatus={gmailStatus} onGmailChanged={onGmailChanged} value={gmailAppPassword} onChange={setGmailAppPassword} disabled={loading} senderEmail={user?.email} />
                         </Grid>
                         <Grid size={{ xs: 12, sm: 6 }}>
                             <TextField fullWidth label="Subject"
@@ -752,7 +804,7 @@ const MassAlertModal = ({ open, onClose, onSend, loading, templates, user, gmail
                         </Button>
                         {attachment && <Typography variant="body2" noWrap sx={{maxWidth: '200px'}}>{attachment.name}</Typography>}
                         <Box flexGrow={1} />
-                        <BusyButton onClick={handleSend} variant="contained" startIcon={<SendIcon />} loading={loading} loadingText="Sending…" disabled={!subject || !body || !gmailAppPassword.trim()}>
+                        <BusyButton onClick={handleSend} variant="contained" startIcon={<SendIcon />} loading={loading} loadingText="Sending…" disabled={!subject || !body || !canSend}>
                             Send to all students
                         </BusyButton>
                     </Box>
@@ -855,6 +907,10 @@ function App() {
     const [listMode, setListMode] = useState(''); // 'low' | 'all'
     // Gmail app password is kept in memory only (cleared on logout / refresh)
     const [gmailAppPassword, setGmailAppPassword] = useState('');
+    const [gmailStatus, setGmailStatus] = useState(null);
+    const fetchGmailStatus = useCallback(async () => {
+        try { setGmailStatus(await api.getGmailStatus()); } catch (err) { /* shown on next action */ }
+    }, []);
     // manual entry fields for new feature
     const [manualRegNo, setManualRegNo] = useState('');
     const [manualName, setManualName] = useState('');
@@ -976,12 +1032,26 @@ function App() {
 
     // --- HANDLERS ---
     const handleLogin = (signedInUser) => { setSessionNotice(''); setUser(signedInUser); };
-    const resetSessionState = () => { setUser(null); setView('dashboard'); setGmailAppPassword(''); setDisplayData([]); setIntermediateCsv(''); setPdfSummary(null); setFile(null); };
+    const resetSessionState = () => { setGmailStatus(null); setUser(null); setView('dashboard'); setGmailAppPassword(''); setDisplayData([]); setIntermediateCsv(''); setPdfSummary(null); setFile(null); };
     const handleLogout = () => { api.logout().catch(() => {}); resetSessionState(); };
 
     useEffect(() => {
         api.me().then(res => setUser(res.user)).catch(() => setUser(null)).finally(() => setAuthChecked(true));
     }, []);
+
+    // Load the Gmail connection once signed in; handle the return from Google's consent screen (?gmail=...)
+    useEffect(() => {
+        if (!user) return;
+        fetchGmailStatus();
+        const params = new URLSearchParams(window.location.search);
+        const result = params.get('gmail');
+        if (result) {
+            setSnackbar(result === 'connected'
+                ? { open: true, message: 'Gmail connected. You can now send emails.', severity: 'success' }
+                : { open: true, message: params.get('reason') || 'Could not connect Gmail.', severity: 'error' });
+            window.history.replaceState({}, '', window.location.pathname);
+        }
+    }, [user, fetchGmailStatus]);
 
     // Sign out automatically when the login token expires
     useEffect(() => {
@@ -1342,7 +1412,7 @@ function App() {
                                             {[
                                                 ['Upload', 'Drop the Consolidated Academic Status PDF on the Low Attendance page.'],
                                                 ['Review', 'Check the students below 75% and their subjects. Fix any missing emails.'],
-                                                ['Send', 'Enter your Gmail app password, press Test, then send. You get a delivery summary.'],
+                                                ['Send', gmailStatus?.configured ? 'Connect your Gmail once (Account page or the send window), then send. You get a delivery summary.' : 'Enter your Gmail app password, press Test, then send. You get a delivery summary.'],
                                             ].map(([t, d], i) => (
                                                 <Box key={t} sx={{ display: 'flex', gap: 1.5, mb: 2 }}>
                                                     <Box sx={{ width: 24, height: 24, borderRadius: '50%', flexShrink: 0, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 600, color: tokens.accent, border: `1px solid ${alpha(tokens.accent, 0.45)}` }}>{i + 1}</Box>
@@ -1352,9 +1422,15 @@ function App() {
                                             <Divider sx={{ my: 2 }} />
                                             <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>Most used subject line</Typography>
                                             <Typography variant="body2" sx={{ fontWeight: 500, mb: 2 }}>{analytics.most_frequent_subject || '—'}</Typography>
-                                            <Link href={GMAIL_APP_PASSWORD_URL} target="_blank" rel="noopener noreferrer" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, fontSize: '0.8125rem', fontWeight: 500 }}>
-                                                Create your Gmail app password <OpenInNewIcon sx={{ fontSize: 14 }} />
-                                            </Link>
+                                            {gmailStatus?.configured ? (
+                                                gmailStatus.connected
+                                                    ? <Typography variant="body2" sx={{ color: tokens.accent }}>✓ Gmail connected ({gmailStatus.google_email})</Typography>
+                                                    : <Button size="small" variant="contained" onClick={() => setView('account')}>Connect Gmail</Button>
+                                            ) : (
+                                                <Link href={GMAIL_APP_PASSWORD_URL} target="_blank" rel="noopener noreferrer" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, fontSize: '0.8125rem', fontWeight: 500 }}>
+                                                    Create your Gmail app password <OpenInNewIcon sx={{ fontSize: 14 }} />
+                                                </Link>
+                                            )}
                                         </Section>
                                     </Grid>
                                 </Grid>
@@ -1481,7 +1557,7 @@ function App() {
                             </Alert>
                         )}
 
-                        <Section step="3" title="Send emails" description="Enter your Gmail app password in the next step. Each student gets a personalised email listing their subjects, and you get a delivery summary.">
+                        <Section step="3" title="Send emails" description={`${gmailStatus?.configured ? (gmailStatus.connected ? 'Your Gmail is connected.' : 'Connect your Gmail in the next step (only once).') : 'Enter your Gmail app password in the next step.'} Each student gets a personalised email listing their subjects, and you get a delivery summary.`}>
                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
                                 <Button variant="contained" size="large" startIcon={<SendIcon />} onClick={() => setIsModalOpen(true)} disabled={displayData.length === 0 || busyWorkflow}>
                                     Review &amp; send {displayData.length > 0 ? `${displayData.length} email${displayData.length > 1 ? 's' : ''}` : 'emails'}
@@ -1778,7 +1854,7 @@ function App() {
                                         </Box>
                                     ))}
                                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
-                                        Emails to students are sent from this address using your Gmail app password.
+                                        Emails to students are sent from this address (connect Gmail under Sending account).
                                     </Typography>
                                 </Section>
                             </Grid>
@@ -1793,8 +1869,10 @@ function App() {
                                         </Stack>
                                     </Box>
                                 </Section>
-                                <Section title="Gmail app password" description="Check your app password before a big send. It's kept in this browser tab only until you sign out." sx={{ mb: 0 }}>
-                                    <GmailAppPasswordField value={gmailAppPassword} onChange={setGmailAppPassword} senderEmail={user.email} />
+                                <Section title="Sending account"
+                                    description={gmailStatus?.configured ? 'Emails to students are sent from your connected Gmail. You can disconnect at any time.' : "Check your app password before a big send. It's kept in this browser tab only until you sign out."}
+                                    sx={{ mb: 0 }}>
+                                    <SendingAccountField gmailStatus={gmailStatus} onGmailChanged={fetchGmailStatus} value={gmailAppPassword} onChange={setGmailAppPassword} senderEmail={user.email} />
                                 </Section>
                             </Grid>
                         </Grid>
@@ -1805,7 +1883,7 @@ function App() {
             <ImportStudentsDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={(res) => { if (res.created || res.updated) fetchStudents(managementSearch); }} />
 
             {/* Workflow Email Modal */}
-            <EmailModal open={isModalOpen} onClose={() => setIsModalOpen(false)} data={displayData} onSendAll={handleSendAllEmails} onSendSingle={handleSendSingleEmail} loading={loading} templates={templates} title="Review & send emails" user={user} setDisplayData={setDisplayData} setSnackbar={setSnackbar} gmailAppPassword={gmailAppPassword} setGmailAppPassword={setGmailAppPassword} />
+            <EmailModal open={isModalOpen} onClose={() => setIsModalOpen(false)} data={displayData} onSendAll={handleSendAllEmails} onSendSingle={handleSendSingleEmail} loading={loading} templates={templates} title="Review & send emails" user={user} setDisplayData={setDisplayData} setSnackbar={setSnackbar} gmailAppPassword={gmailAppPassword} setGmailAppPassword={setGmailAppPassword} gmailStatus={gmailStatus} onGmailChanged={fetchGmailStatus} />
 
             {/* Mass Alert Modal */}
             <MassAlertModal
@@ -1817,6 +1895,8 @@ function App() {
                 user={user}
                 gmailAppPassword={gmailAppPassword}
                 setGmailAppPassword={setGmailAppPassword}
+                gmailStatus={gmailStatus}
+                onGmailChanged={fetchGmailStatus}
             />
 
             {/* Template Dialog */}

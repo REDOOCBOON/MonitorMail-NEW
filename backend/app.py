@@ -16,6 +16,8 @@ import os
 import csv
 import secrets
 import hmac
+import base64
+import urllib.parse
 import hashlib
 import html
 
@@ -25,7 +27,7 @@ import uuid
 import imaplib
 import email
 from email.header import decode_header
-from email_util import EmailSender
+from email_util import EmailSender, GmailApiSender, GmailAuthError, http_json, GOOGLE_TOKEN_URL
 import logging
 from dotenv import load_dotenv
 
@@ -271,6 +273,13 @@ CREATE TABLE IF NOT EXISTS teacher_registrations (
     last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS gmail_connections (
+    teacher_id INTEGER PRIMARY KEY,  -- teachers.id (older databases have no primary key there, so no FK)
+    google_email VARCHAR(100) NOT NULL,
+    refresh_token_enc TEXT NOT NULL,
+    connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS password_resets (
     email VARCHAR(100) PRIMARY KEY,
     otp_hash VARCHAR(128) NOT NULL,
@@ -378,20 +387,39 @@ def ensure_admin_exists():
 
 # --- System emails (OTP / approval notifications) ---
 def send_system_email(to_email, subject, body_html):
-    """Send an email from the configured system Gmail account. Returns (success, message)."""
-    if not SYSTEM_EMAIL or not SYSTEM_EMAIL_APP_PASSWORD:
-        return False, 'System email is not configured (set SYSTEM_EMAIL and SYSTEM_EMAIL_APP_PASSWORD in backend/.env).'
-    sender = EmailSender(sender_email=SYSTEM_EMAIL, sender_password=SYSTEM_EMAIL_APP_PASSWORD, max_retries=2, timeout=15)
+    """
+    Send OTP / approval emails from SYSTEM_EMAIL. Uses that account's connected Gmail (API) when available,
+    otherwise SYSTEM_EMAIL_APP_PASSWORD over SMTP. Returns (success, message).
+    """
+    if not SYSTEM_EMAIL:
+        return False, 'System email is not configured (set SYSTEM_EMAIL in backend/.env).'
+    sender = None
     try:
+        if gmail_api_configured():
+            conn = get_db_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM teachers WHERE LOWER(email) = %s ORDER BY id LIMIT 1", (SYSTEM_EMAIL.lower(),))
+                row = cursor.fetchone()
+            finally:
+                conn.close()
+            connection = _gmail_connection(row[0]) if row else None
+            if connection:
+                sender = GmailApiSender(connection[0], connection[1], GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
+        if sender is None:
+            if not SYSTEM_EMAIL_APP_PASSWORD:
+                return False, f'The system account ({SYSTEM_EMAIL}) has not connected Gmail yet.'
+            sender = EmailSender(sender_email=SYSTEM_EMAIL, sender_password=SYSTEM_EMAIL_APP_PASSWORD, max_retries=2, timeout=15)
         sender.connect()
         return sender.send_email(to_email=to_email, subject=subject, body_html=body_html)
-    except smtplib.SMTPAuthenticationError:
-        return False, 'System email login failed. Check SYSTEM_EMAIL_APP_PASSWORD in backend/.env.'
+    except (smtplib.SMTPAuthenticationError, GmailAuthError):
+        return False, 'The system email account could not sign in to Gmail.'
     except Exception as e:
         logger.exception(f'system email failed: {e}')
         return False, 'Could not send email.'
     finally:
-        sender.logout()
+        if sender:
+            sender.logout()
 
 
 def _hash_otp(email, otp):
@@ -1337,6 +1365,183 @@ def _connect_teacher_gmail(teacher_email, gmail_app_password):
         return None, 'Could not connect to Gmail. Please try again.'
 
 
+# --- Gmail connection (Google OAuth, send-only permission) ---
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '').strip()
+PUBLIC_URL = next((o.strip().rstrip('/') for o in FRONTEND_ORIGIN.split(',') if o.strip() and o.strip() != '*'), 'http://localhost:3000')
+GOOGLE_REDIRECT_URI = os.environ.get('GOOGLE_REDIRECT_URI', f'{PUBLIC_URL}/api/google/callback')
+GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
+GOOGLE_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo'
+GOOGLE_REVOKE_URL = 'https://oauth2.googleapis.com/revoke'
+GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send'
+GMAIL_SCOPES = f'openid email {GMAIL_SEND_SCOPE}'
+
+_oauth_nonces = {}  # nonce -> expiry (one-time use)
+
+
+def gmail_api_configured():
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+
+
+def _token_cipher():
+    # Refresh tokens are encrypted at rest with a key derived from SECRET_KEY
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    key = HKDF(algorithm=hashes.SHA256(), length=32, salt=b'monitormail', info=b'gmail-refresh-token').derive(SECRET_KEY.encode())
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
+def _gmail_connection(teacher_id):
+    """Returns (google_email, refresh_token) or None."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT google_email, refresh_token_enc FROM gmail_connections WHERE teacher_id = %s", (teacher_id,))
+        row = cursor.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    try:
+        return row[0], _token_cipher().decrypt(row[1].encode()).decode()
+    except Exception:
+        logger.warning(f"Could not decrypt Gmail token for teacher {teacher_id} (SECRET_KEY changed?)")
+        return None
+
+
+def _delete_gmail_connection(teacher_id):
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("DELETE FROM gmail_connections WHERE teacher_id = %s", (teacher_id,))
+    conn.commit()
+    conn.close()
+
+
+def open_email_sender(teacher_id, teacher_email, gmail_app_password=''):
+    """
+    Pick how to send for this teacher: their connected Gmail (API over HTTPS) first, else an app password (SMTP).
+    Returns (sender, None, None) or (None, error_message, http_status).
+    """
+    if gmail_api_configured():
+        connection = _gmail_connection(teacher_id)
+        if connection:
+            sender = GmailApiSender(connection[0], connection[1], GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
+            try:
+                sender.connect()
+                return sender, None, None
+            except GmailAuthError:
+                _delete_gmail_connection(teacher_id)
+                return None, 'Your Gmail connection has expired or was removed. Please click "Connect Gmail" again.', 400
+            except Exception as e:
+                logger.warning(f"Gmail API token refresh failed: {e}")
+                return None, 'Could not reach Gmail. Please try again in a moment.', 502
+        if not gmail_app_password:
+            return None, 'Connect your Gmail account first (the "Connect Gmail" button).', 400
+    email_sender, error = _connect_teacher_gmail(teacher_email, gmail_app_password)
+    if error:
+        return None, error, 400 if 'app password' in error else 502
+    return email_sender, None, None
+
+
+@app.route('/api/google/status', methods=['GET'])
+@token_required
+def gmail_status():
+    connection = _gmail_connection(g.current_user['id']) if gmail_api_configured() else None
+    return jsonify({'configured': gmail_api_configured(), 'connected': bool(connection),
+                    'google_email': connection[0] if connection else None})
+
+
+@app.route('/api/google/connect', methods=['POST'])
+@token_required
+def gmail_connect():
+    if not gmail_api_configured():
+        return jsonify({'message': 'Gmail connection is not set up on this server.'}), 400
+    if _throttled(f'gmail-connect:{g.current_user["id"]}', 10, 600):
+        return too_many_requests()
+    now = time.time()
+    for n, exp in list(_oauth_nonces.items()):
+        if exp < now:
+            _oauth_nonces.pop(n, None)
+    nonce = secrets.token_urlsafe(24)
+    _oauth_nonces[nonce] = now + 600
+    state = jwt.encode({'sub': str(g.current_user['id']), 'purpose': 'gmail-connect', 'nonce': nonce,
+                        'exp': datetime.now(timezone.utc) + timedelta(minutes=10)}, app.config['SECRET_KEY'], algorithm='HS256')
+    params = {
+        'client_id': GOOGLE_CLIENT_ID, 'redirect_uri': GOOGLE_REDIRECT_URI, 'response_type': 'code',
+        'scope': GMAIL_SCOPES, 'access_type': 'offline', 'prompt': 'consent', 'include_granted_scopes': 'true',
+        'login_hint': g.current_user['email'], 'state': state,
+    }
+    return jsonify({'url': f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"})
+
+
+def _oauth_done(status, reason=''):
+    """Small page that sends the browser back into the app (a same-site navigation, so the session cookie is sent)."""
+    target = f"/?gmail={status}" + (f"&reason={urllib.parse.quote(reason)}" if reason else '')
+    body = f'<!doctype html><meta http-equiv="refresh" content="0;url={html.escape(target)}"><title>MonitorMail</title>Returning to MonitorMail…'
+    return app.response_class(body, mimetype='text/html')
+
+
+@app.route('/api/google/callback', methods=['GET'])
+def gmail_callback():
+    if request.args.get('error'):
+        return _oauth_done('error', 'Gmail permission was not granted.')
+    try:
+        claims = jwt.decode(request.args.get('state', ''), app.config['SECRET_KEY'], algorithms=['HS256'], options={'require': ['exp', 'sub']})
+        if claims.get('purpose') != 'gmail-connect' or _oauth_nonces.pop(claims.get('nonce'), 0) < time.time():
+            raise ValueError('bad state')
+        teacher_id = int(claims['sub'])
+    except Exception:
+        return _oauth_done('error', 'This link has expired. Please click "Connect Gmail" again.')
+
+    status, tokens = http_json(GOOGLE_TOKEN_URL, form={
+        'code': request.args.get('code', ''), 'client_id': GOOGLE_CLIENT_ID, 'client_secret': GOOGLE_CLIENT_SECRET,
+        'redirect_uri': GOOGLE_REDIRECT_URI, 'grant_type': 'authorization_code',
+    })
+    if status != 200 or not tokens.get('access_token'):
+        logger.warning(f"Google code exchange failed: {status} {tokens.get('error')}")
+        return _oauth_done('error', 'Google did not accept the sign-in. Please try again.')
+    if GMAIL_SEND_SCOPE not in (tokens.get('scope') or '').split():
+        return _oauth_done('error', 'Please tick "Send email on your behalf" on the Google screen.')
+    if not tokens.get('refresh_token'):
+        return _oauth_done('error', 'Google did not return a long-term permission. Please try again.')
+
+    _, info = http_json(GOOGLE_USERINFO_URL, token=tokens['access_token'], method='GET')
+    google_email = str(info.get('email') or '').lower()
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT email FROM teachers WHERE id = %s AND status = 'approved'", (teacher_id,))
+        row = cursor.fetchone()
+        if not row:
+            return _oauth_done('error', 'Your account is not active.')
+        if not info.get('email_verified') or google_email != row[0].lower():
+            http_json(GOOGLE_REVOKE_URL, form={'token': tokens['refresh_token']})
+            return _oauth_done('error', f'Please choose the Google account {row[0]} (you picked {google_email or "another account"}).')
+        cursor.execute(
+            """INSERT INTO gmail_connections (teacher_id, google_email, refresh_token_enc) VALUES (%s, %s, %s)
+               ON CONFLICT (teacher_id) DO UPDATE SET google_email = EXCLUDED.google_email,
+                   refresh_token_enc = EXCLUDED.refresh_token_enc, connected_at = NOW()""",
+            (teacher_id, google_email, _token_cipher().encrypt(tokens['refresh_token'].encode()).decode())
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    audit('gmail_connected', google_email, actor=google_email)
+    return _oauth_done('connected')
+
+
+@app.route('/api/google/disconnect', methods=['POST'])
+@token_required
+def gmail_disconnect():
+    connection = _gmail_connection(g.current_user['id'])
+    if connection:
+        http_json(GOOGLE_REVOKE_URL, form={'token': connection[1]})  # best effort
+    _delete_gmail_connection(g.current_user['id'])
+    audit('gmail_disconnected', g.current_user['email'])
+    return jsonify({'message': 'Gmail disconnected.'})
+
+
 def _log_history(conn, reg_no, name, subject, body, recipients, teacher_email):
     with conn.cursor() as cursor:
         cursor.execute(
@@ -1379,10 +1584,10 @@ def send_emails_endpoint():
         attachment_payload = attachment.read() if attachment else None
         attachment_filename = attachment.filename if attachment else None
 
-        email_sender, error = _connect_teacher_gmail(teacher_email, gmail_app_password)
+        email_sender, error, error_status = open_email_sender(g.current_user['id'], teacher_email, gmail_app_password)
         if error:
             logger.error(f"❌ {error}")
-            return jsonify({'success': False, 'error': error, 'results': []}), 400 if 'app password' in error else 502
+            return jsonify({'success': False, 'message': error, 'results': []}), error_status
 
         conn = get_db_connection()
         results = []
@@ -1518,9 +1723,9 @@ def alert_all_students():
             return jsonify({'success': False, 'reason': 'No students found in database.'}), 404
         logger.info(f"Found {len(all_students)} students to send alert to")
 
-        email_sender, error = _connect_teacher_gmail(teacher_email, gmail_app_password)
+        email_sender, error, error_status = open_email_sender(g.current_user['id'], teacher_email, gmail_app_password)
         if error:
-            return jsonify({'success': False, 'reason': error}), 400 if 'app password' in error else 502
+            return jsonify({'success': False, 'message': error}), error_status
 
         for idx, (reg_no, name, student_email, parent_email) in enumerate(all_students, 1):
             try:
@@ -1580,11 +1785,12 @@ def test_email_connection():
     teacher_email = g.current_user['user']
     if _throttled(f'gmail-test:{g.current_user["id"]}', 10, 600):
         return too_many_requests()
-    email_sender, error = _connect_teacher_gmail(teacher_email, gmail_app_password)
+    email_sender, error, error_status = open_email_sender(g.current_user['id'], teacher_email, gmail_app_password)
     if error:
-        return jsonify({'success': False, 'message': error}), 400
+        return jsonify({'success': False, 'message': error}), error_status
+    via = 'connected Gmail' if isinstance(email_sender, GmailApiSender) else 'app password'
     email_sender.logout()
-    return jsonify({'success': True, 'message': f'Connected to Gmail as {teacher_email}.'})
+    return jsonify({'success': True, 'message': f'Ready to send as {email_sender.sender_email} ({via}).'})
 
 
 # Accepted spreadsheet headings for student import (lower-case, punctuation removed) -> students column
@@ -1894,6 +2100,7 @@ def delete_teacher(teacher_id):
         cursor = conn.cursor()
         cursor.execute("DELETE FROM teachers WHERE id = %s RETURNING email", (teacher_id,))
         deleted = cursor.fetchone()
+        cursor.execute("DELETE FROM gmail_connections WHERE teacher_id = %s", (teacher_id,))
         conn.commit()
         cursor.close()
         conn.close()

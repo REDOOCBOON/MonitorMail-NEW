@@ -3,7 +3,7 @@ services:
   - type: web
     name: monitormail
     runtime: docker
-    plan: starter            # free instances can't send email (outbound SMTP is blocked)
+    plan: free               # email goes through the Gmail API over HTTPS, which works on the free plan
     region: singapore        # closest to India
     healthCheckPath: /api/health
     autoDeploy: true
@@ -18,7 +18,9 @@ services:
         value: Admin
       - key: SYSTEM_EMAIL
         sync: false
-      - key: SYSTEM_EMAIL_APP_PASSWORD
+      - key: GOOGLE_CLIENT_ID
+        sync: false          # from Google Cloud Console > Credentials (OAuth client, Web application)
+      - key: GOOGLE_CLIENT_SECRET
         sync: false
       - key: FRONTEND_ORIGIN
         sync: false          # your Render URL, e.g. https://monitormail.onrender.com

@@ -72,6 +72,11 @@ export const changePassword = (currentPassword, newPassword) => request('/api/au
     body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
 });
 
+// --- Gmail connection (Google sign-in, send-only permission) ---
+export const getGmailStatus = () => request('/api/google/status', { method: 'GET' });
+export const startGmailConnect = () => request('/api/google/connect', { method: 'POST' });
+export const disconnectGmail = () => request('/api/google/disconnect', { method: 'POST' });
+
 // Checks the Gmail app password without sending anything
 export const testEmailConnection = (gmailAppPassword) => request('/api/email/test-connection', {
     method: 'POST',
