@@ -228,10 +228,11 @@ def unhandled_error(error):
 
 # --- DB Connection Helper ---
 def get_db_connection():
-    if isinstance(DB_CONFIG, str): 
-        conn = psycopg2.connect(DB_CONFIG)
-    else: 
-        conn = psycopg2.connect(**DB_CONFIG)
+    conn = psycopg2.connect(DB_CONFIG)
+    # Always look up tables in "public": pooled connections (e.g. Neon's -pooler host) can hand over a
+    # session whose search_path another client changed
+    with conn.cursor() as cursor:
+        cursor.execute("SET search_path TO public")
     return conn
 
 SCHEMA_SQL = """
