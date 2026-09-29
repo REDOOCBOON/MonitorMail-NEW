@@ -381,7 +381,7 @@ def send_system_email(to_email, subject, body_html):
     """Send an email from the configured system Gmail account. Returns (success, message)."""
     if not SYSTEM_EMAIL or not SYSTEM_EMAIL_APP_PASSWORD:
         return False, 'System email is not configured (set SYSTEM_EMAIL and SYSTEM_EMAIL_APP_PASSWORD in backend/.env).'
-    sender = EmailSender(sender_email=SYSTEM_EMAIL, sender_password=SYSTEM_EMAIL_APP_PASSWORD, max_retries=2, timeout=30)
+    sender = EmailSender(sender_email=SYSTEM_EMAIL, sender_password=SYSTEM_EMAIL_APP_PASSWORD, max_retries=2, timeout=15)
     try:
         sender.connect()
         return sender.send_email(to_email=to_email, subject=subject, body_html=body_html)
@@ -1322,7 +1322,7 @@ def _connect_teacher_gmail(teacher_email, gmail_app_password):
     logger = logging.getLogger(__name__)
     if not gmail_app_password:
         return None, 'Gmail app password is required. Please enter your 16-character app password.'
-    email_sender = EmailSender(sender_email=teacher_email, sender_password=gmail_app_password, max_retries=3, timeout=30)
+    email_sender = EmailSender(sender_email=teacher_email, sender_password=gmail_app_password, max_retries=2, timeout=15)
     try:
         email_sender.connect()
         logger.info("✅ Gmail SMTP connection successful")

@@ -3,6 +3,7 @@ Email sending utility with retry logic, proper error handling, and production-re
 """
 import smtplib
 import socket
+import ssl
 import time
 import logging
 from email.mime.multipart import MIMEMultipart
@@ -20,10 +21,35 @@ logger = logging.getLogger(__name__)
 def _single_line(value):
     return re.sub(r'[\r\n]+', ' ', str(value or '')).strip()
 
+SMTP_HOST = 'smtp.gmail.com'
+SMTP_ENDPOINTS = [(587, False), (465, True)]  # STARTTLS first, then implicit SSL
+
+
+def _tls_context():
+    """Verified TLS (smtplib's default STARTTLS does not check the server certificate)."""
+    return ssl.create_default_context()
+
+
+def _ipv4_address(host):
+    # Many containers have no IPv6 route; Gmail resolves to IPv6 first, which fails with "Network is unreachable"
+    return socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+
+
+class _IPv4SMTP(smtplib.SMTP):
+    def _get_socket(self, host, port, timeout):
+        return socket.create_connection((_ipv4_address(host), port), timeout, self.source_address)
+
+
+class _IPv4SMTP_SSL(smtplib.SMTP_SSL):
+    def _get_socket(self, host, port, timeout):
+        sock = socket.create_connection((_ipv4_address(host), port), timeout, self.source_address)
+        return self.context.wrap_socket(sock, server_hostname=host)
+
+
 class EmailSender:
     """Handles email sending with retry logic and proper error handling."""
     
-    def __init__(self, sender_email, sender_password, max_retries=3, timeout=30):
+    def __init__(self, sender_email, sender_password, max_retries=2, timeout=15):
         """
         Initialize email sender.
         
@@ -41,73 +67,55 @@ class EmailSender:
     
     def connect(self):
         """
-        Establish SMTP connection with retry logic.
-        
-        Returns:
-            bool: True if connection successful, False otherwise
-        
+        Log in to Gmail over SMTP. Tries port 587 (STARTTLS) and then 465 (SSL), over IPv4, with retries.
+
         Raises:
-            smtplib.SMTPAuthenticationError: If credentials are invalid
-            Exception: For other connection errors (will log and raise)
+            smtplib.SMTPAuthenticationError: If credentials are invalid (not retried)
+            OSError: If Gmail can't be reached on any port
         """
+        last_error = None
         for attempt in range(1, self.max_retries + 1):
-            try:
-                logger.info(f"[Attempt {attempt}/{self.max_retries}] Connecting to SMTP server...")
-                
-                # Set socket timeout globally for this connection
-                socket.setdefaulttimeout(self.timeout)
-                
-                # Create SMTP connection with explicit timeout
-                self.server = smtplib.SMTP(
-                    'smtp.gmail.com',
-                    587,
-                    timeout=self.timeout
-                )
-                
-                # Enable debug logging if needed
-                # self.server.set_debuglevel(1)
-                
-                # Identify ourselves and wait for response
-                self.server.ehlo()
-                
-                # Start TLS encryption
-                logger.info("Starting TLS...")
-                self.server.starttls()
-                
-                # Re-identify ourselves over the encrypted connection
-                self.server.ehlo()
-                
-                # Login with credentials
-                logger.info("Authenticating...")
-                self.server.login(self.sender_email, self.sender_password)
-                
-                logger.info("✅ SMTP connection successful!")
-                return True
-                
-            except smtplib.SMTPAuthenticationError as e:
-                logger.error(f"❌ Authentication failed: {e}")
-                self.server = None
-                raise  # Don't retry on auth errors
-                
-            except (socket.timeout, socket.gaierror, ConnectionRefusedError, ConnectionResetError, OSError) as e:
-                logger.warning(f"⚠️  Connection attempt {attempt} failed: {type(e).__name__}: {e}")
-                self.server = None
-                
-                if attempt < self.max_retries:
-                    wait_time = 2 ** attempt  # Exponential backoff: 2s, 4s, 8s
-                    logger.info(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"❌ Failed to connect after {self.max_retries} attempts")
-                    raise
-                    
-            except Exception as e:
-                logger.error(f"❌ Unexpected error: {type(e).__name__}: {e}")
-                self.server = None
-                raise
-        
-        return False
-    
+            for port, use_ssl in SMTP_ENDPOINTS:
+                try:
+                    logger.info(f"[Attempt {attempt}/{self.max_retries}] Connecting to {SMTP_HOST}:{port}...")
+                    if use_ssl:
+                        self.server = _IPv4SMTP_SSL(SMTP_HOST, port, timeout=self.timeout, context=_tls_context())
+                    else:
+                        self.server = _IPv4SMTP(SMTP_HOST, port, timeout=self.timeout)
+                        self.server.ehlo()
+                        self.server.starttls(context=_tls_context())
+                    self.server.ehlo()
+                    self.server.login(self.sender_email, self.sender_password)
+                    logger.info(f"✅ SMTP connection successful (port {port})")
+                    return True
+
+                except smtplib.SMTPAuthenticationError as e:
+                    logger.error(f"❌ Authentication failed: {e}")
+                    self._discard()
+                    raise  # Don't retry on auth errors
+
+                except (socket.timeout, socket.gaierror, ConnectionError, OSError, smtplib.SMTPServerDisconnected) as e:
+                    logger.warning(f"⚠️  {SMTP_HOST}:{port} failed: {type(e).__name__}: {e}")
+                    self._discard()
+                    last_error = e
+
+            if attempt < self.max_retries:
+                wait_time = 2 ** attempt
+                logger.info(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+
+        logger.error(f"❌ Could not reach {SMTP_HOST} on ports 587 or 465 after {self.max_retries} attempts. "
+                     "If this runs on a cloud host, it may be blocking outgoing SMTP.")
+        raise last_error or OSError('SMTP connection failed')
+
+    def _discard(self):
+        try:
+            if self.server:
+                self.server.close()
+        except Exception:
+            pass
+        self.server = None
+
     def send_email(self, to_email, subject, body_html, cc_email=None, attachment_data=None, attachment_filename=None):
         """
         Send a single email with optional attachment.
