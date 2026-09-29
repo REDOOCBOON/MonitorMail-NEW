@@ -1,0 +1,32 @@
+# Render Blueprint: New > Blueprint > pick this repo
+services:
+  - type: web
+    name: monitormail
+    runtime: docker
+    plan: starter            # free instances can't send email (outbound SMTP is blocked)
+    region: singapore        # closest to India
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true  # Render creates a random secret
+      - key: DATABASE_URL
+        sync: false          # paste your Neon connection string
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_NAME
+        value: Admin
+      - key: SYSTEM_EMAIL
+        sync: false
+      - key: SYSTEM_EMAIL_APP_PASSWORD
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false          # your Render URL, e.g. https://monitormail.onrender.com
+      - key: ALLOWED_TEACHER_DOMAIN
+        value: srmist.edu.in
+      - key: OTP_CONSOLE_FALLBACK
+        value: "false"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: TRUST_PROXY
+        value: "true"

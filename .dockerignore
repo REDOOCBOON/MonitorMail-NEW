@@ -1,0 +1,12 @@
+# Keep secrets, archives and local artefacts out of the image
+Previous files
+**/.env
+**/.env.*
+!**/.env.template
+**/node_modules
+frontend/build
+**/__pycache__
+**/*.log
+**/*.sql
+.git
+.DS_Store
