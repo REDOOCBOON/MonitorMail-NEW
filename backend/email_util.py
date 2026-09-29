@@ -206,9 +206,11 @@ def http_json(url, form=None, body=None, token=None, method='POST', timeout=20):
         headers['Content-Type'] = 'application/json'
     if token:
         headers['Authorization'] = f'Bearer {token}'
+    if not url.startswith('https://'):  # only fixed Google HTTPS endpoints are ever called
+        raise ValueError('Only https:// URLs are allowed')
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310 - scheme checked above
             raw = response.read()
             return response.status, (json.loads(raw) if raw else {})
     except urllib.error.HTTPError as e:
