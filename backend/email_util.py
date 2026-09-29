@@ -10,6 +10,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+from email.utils import formataddr
 
 import base64
 import json
@@ -51,13 +52,16 @@ class _IPv4SMTP_SSL(smtplib.SMTP_SSL):
         return self.context.wrap_socket(sock, server_hostname=host)
 
 
-def build_message(sender_email, to_email, subject, body_html, cc_email=None, attachment_data=None, attachment_filename=None):
+def build_message(sender_email, to_email, subject, body_html, cc_email=None, attachment_data=None, attachment_filename=None,
+                  from_name=None, reply_to=None):
     """Build the MIME message. Returns (message, [recipients])."""
     # Header values must be single-line: stops header injection (e.g. a Bcc smuggled into the subject)
     to_email = _single_line(to_email)
     cc_email = _single_line(cc_email) if cc_email else None
     msg = MIMEMultipart()
-    msg['From'] = sender_email
+    msg['From'] = formataddr((_single_line(from_name), sender_email)) if from_name else sender_email
+    if reply_to:
+        msg['Reply-To'] = _single_line(reply_to)
     msg['To'] = to_email
     if cc_email:
         msg['Cc'] = cc_email
@@ -89,6 +93,8 @@ class EmailSender:
         """
         self.sender_email = sender_email
         self.sender_password = sender_password
+        self.display_name = None  # shown in From: "Name <address>"
+        self.reply_to = None
         self.max_retries = max_retries
         self.timeout = timeout
         self.server = None
@@ -147,7 +153,8 @@ class EmailSender:
     def send_email(self, to_email, subject, body_html, cc_email=None, attachment_data=None, attachment_filename=None):
         """Send one email. Returns (success: bool, message: str)."""
         try:
-            msg, recipients = build_message(self.sender_email, to_email, subject, body_html, cc_email, attachment_data, attachment_filename)
+            msg, recipients = build_message(self.sender_email, to_email, subject, body_html, cc_email, attachment_data, attachment_filename,
+                                            from_name=self.display_name, reply_to=self.reply_to)
             self.server.sendmail(self.sender_email, recipients, msg.as_string())
             logger.info(f"✅ Email sent to {recipients[0]}")
             return True, "Email sent successfully"
@@ -226,6 +233,8 @@ class GmailApiSender:
 
     def __init__(self, sender_email, refresh_token, client_id, client_secret, timeout=20):
         self.sender_email = sender_email
+        self.display_name = None
+        self.reply_to = None
         self.refresh_token = refresh_token
         self.client_id = client_id
         self.client_secret = client_secret
@@ -246,7 +255,8 @@ class GmailApiSender:
 
     def send_email(self, to_email, subject, body_html, cc_email=None, attachment_data=None, attachment_filename=None):
         try:
-            msg, recipients = build_message(self.sender_email, to_email, subject, body_html, cc_email, attachment_data, attachment_filename)
+            msg, recipients = build_message(self.sender_email, to_email, subject, body_html, cc_email, attachment_data, attachment_filename,
+                                            from_name=self.display_name, reply_to=self.reply_to)
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
             status, data = http_json(GMAIL_SEND_URL, body={'raw': raw}, token=self.access_token, timeout=self.timeout)
             if status == 401:  # access token expired mid-run: refresh once and retry

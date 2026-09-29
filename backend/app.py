@@ -1418,11 +1418,21 @@ def _delete_gmail_connection(teacher_id):
     conn.close()
 
 
-def open_email_sender(teacher_id, teacher_email, gmail_app_password=''):
+def open_email_sender(teacher_id, teacher_email, gmail_app_password='', teacher_name=None):
     """
     Pick how to send for this teacher: their connected Gmail (API over HTTPS) first, else an app password (SMTP).
     Returns (sender, None, None) or (None, error_message, http_status).
     """
+    sender, error, status = _open_email_sender(teacher_id, teacher_email, gmail_app_password)
+    if sender:
+        sender.display_name = teacher_name or None
+        # Sending from a different address (e.g. personal Gmail): replies go to the teacher's official address
+        if sender.sender_email.lower() != teacher_email.lower():
+            sender.reply_to = teacher_email
+    return sender, error, status
+
+
+def _open_email_sender(teacher_id, teacher_email, gmail_app_password=''):
     if gmail_api_configured():
         connection = _gmail_connection(teacher_id)
         if connection:
@@ -1469,8 +1479,8 @@ def gmail_connect():
                         'exp': datetime.now(timezone.utc) + timedelta(minutes=10)}, app.config['SECRET_KEY'], algorithm='HS256')
     params = {
         'client_id': GOOGLE_CLIENT_ID, 'redirect_uri': GOOGLE_REDIRECT_URI, 'response_type': 'code',
-        'scope': GMAIL_SCOPES, 'access_type': 'offline', 'prompt': 'consent', 'include_granted_scopes': 'true',
-        'login_hint': g.current_user['email'], 'state': state,
+        'scope': GMAIL_SCOPES, 'access_type': 'offline', 'prompt': 'select_account consent', 'include_granted_scopes': 'true',
+        'state': state,  # no login_hint: teachers may pick any Google account they own (e.g. personal Gmail)
     }
     return jsonify({'url': f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"})
 
@@ -1515,9 +1525,11 @@ def gmail_callback():
         row = cursor.fetchone()
         if not row:
             return _oauth_done('error', 'Your account is not active.')
-        if not info.get('email_verified') or google_email != row[0].lower():
+        # Any Google account the teacher owns is allowed (SRM Workspace may block third-party apps);
+        # replies still go to their MonitorMail (srmist) address via Reply-To
+        if not info.get('email_verified') or not google_email:
             http_json(GOOGLE_REVOKE_URL, form={'token': tokens['refresh_token']})
-            return _oauth_done('error', f'Please choose the Google account {row[0]} (you picked {google_email or "another account"}).')
+            return _oauth_done('error', 'Google did not confirm the email address of that account. Please try another account.')
         cursor.execute(
             """INSERT INTO gmail_connections (teacher_id, google_email, refresh_token_enc) VALUES (%s, %s, %s)
                ON CONFLICT (teacher_id) DO UPDATE SET google_email = EXCLUDED.google_email,
@@ -1584,7 +1596,7 @@ def send_emails_endpoint():
         attachment_payload = attachment.read() if attachment else None
         attachment_filename = attachment.filename if attachment else None
 
-        email_sender, error, error_status = open_email_sender(g.current_user['id'], teacher_email, gmail_app_password)
+        email_sender, error, error_status = open_email_sender(g.current_user['id'], teacher_email, gmail_app_password, g.current_user.get('name'))
         if error:
             logger.error(f"❌ {error}")
             return jsonify({'success': False, 'message': error, 'results': []}), error_status
@@ -1723,7 +1735,7 @@ def alert_all_students():
             return jsonify({'success': False, 'reason': 'No students found in database.'}), 404
         logger.info(f"Found {len(all_students)} students to send alert to")
 
-        email_sender, error, error_status = open_email_sender(g.current_user['id'], teacher_email, gmail_app_password)
+        email_sender, error, error_status = open_email_sender(g.current_user['id'], teacher_email, gmail_app_password, g.current_user.get('name'))
         if error:
             return jsonify({'success': False, 'message': error}), error_status
 
@@ -1785,7 +1797,7 @@ def test_email_connection():
     teacher_email = g.current_user['user']
     if _throttled(f'gmail-test:{g.current_user["id"]}', 10, 600):
         return too_many_requests()
-    email_sender, error, error_status = open_email_sender(g.current_user['id'], teacher_email, gmail_app_password)
+    email_sender, error, error_status = open_email_sender(g.current_user['id'], teacher_email, gmail_app_password, g.current_user.get('name'))
     if error:
         return jsonify({'success': False, 'message': error}), error_status
     via = 'connected Gmail' if isinstance(email_sender, GmailApiSender) else 'app password'

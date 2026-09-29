@@ -83,7 +83,7 @@ Teachers added by the admin in **Teacher Management** are approved immediately.
 
 1. **Low Attendance** page → drop the PDF. The report is read table-by-table; theory subjects keep their slot (e.g. `21CSC303J(B)`) and lab slots are labelled `(Lab)`, so both parts of a course are shown separately.
 2. Students below 75% are listed with their low subjects and emails from the database. Students missing from the database are highlighted; add their emails in the review window (and **Save to DB**).
-3. **Review & send** → **Connect Gmail** once (send-only permission; emails come from your own address). Without Google sign-in configured, enter a Gmail app password instead (kept in memory until you sign out).
+3. **Review & send** → **Connect Gmail** once (send-only permission). Any Google account the teacher owns works; if SRM's Google Workspace blocks third-party apps ("Access blocked … access_not_configured"), connect a personal Gmail: emails show the teacher's name and replies go to their SRM address. SRM IT can allow the app by Client ID (Admin console → Security → API controls) so srmist accounts work too. Without Google sign-in configured, enter a Gmail app password instead (kept in memory until you sign out).
 4. Pick a template (placeholders `[Student Name]`, `[Subject List]`), edit any email, then **Send all emails**. Each student card shows Sent/Failed; retrying only resends the ones that didn't go out.
 
 ## Other features

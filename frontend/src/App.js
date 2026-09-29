@@ -111,7 +111,7 @@ const passwordProblem = (password) => {
 };
 
 // Connect / disconnect the teacher's Gmail (used when the server has Google sign-in configured)
-const GmailConnectPanel = ({ status, onChanged, disabled }) => {
+const GmailConnectPanel = ({ status, onChanged, disabled, accountEmail }) => {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const connect = async () => {
@@ -131,7 +131,10 @@ const GmailConnectPanel = ({ status, onChanged, disabled }) => {
         return (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap', p: 1.5, borderRadius: 2, border: `1px solid ${alpha(tokens.accent, 0.3)}`, backgroundColor: alpha(tokens.accent, 0.06) }}>
                 <CheckIcon sx={{ color: tokens.accent }} fontSize="small" />
-                <Typography variant="body2" sx={{ flexGrow: 1 }}>Sending as <strong>{status.google_email}</strong> via your connected Gmail</Typography>
+                <Typography variant="body2" sx={{ flexGrow: 1 }}>
+                    Sending as <strong>{status.google_email}</strong>
+                    {accountEmail && status.google_email?.toLowerCase() !== accountEmail.toLowerCase() && <> · replies go to <strong>{accountEmail}</strong></>}
+                </Typography>
                 <BusyButton size="small" onClick={disconnect} loading={busy} disabled={disabled}>Disconnect</BusyButton>
                 {error && <Typography variant="caption" sx={{ width: '100%', color: tokens.danger }}>{error}</Typography>}
             </Box>
@@ -141,11 +144,12 @@ const GmailConnectPanel = ({ status, onChanged, disabled }) => {
         <Box sx={{ p: 1.5, borderRadius: 2, border: `1px solid ${tokens.borderStrong}`, backgroundColor: tokens.surfaceRaised }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
                 <MailOutlineIcon fontSize="small" sx={{ color: tokens.textMuted }} />
-                <Typography variant="body2" sx={{ flexGrow: 1 }}>Connect your Gmail once to send emails from your own address.</Typography>
+                <Typography variant="body2" sx={{ flexGrow: 1 }}>Connect a Gmail account once to send emails from it.</Typography>
                 <BusyButton size="small" variant="contained" onClick={connect} loading={busy} loadingText="Opening Google…" disabled={disabled}>Connect Gmail</BusyButton>
             </Box>
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                MonitorMail only gets permission to <em>send</em> email, not to read it. If Google shows "Google hasn't verified this app", click <strong>Advanced → Go to MonitorMail</strong>.
+                If your @srmist.edu.in account shows <strong>"Access blocked: Your institution's admin needs to review MonitorMail"</strong>, choose your <strong>personal Gmail</strong> instead; replies from students and parents will still go to your SRM address.
+                On "Google hasn't verified this app", click <strong>Advanced → Go to monitormail.onrender.com</strong>, and tick <strong>Send email on your behalf</strong>. MonitorMail can only send email, never read it.
             </Typography>
             {error && <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: tokens.danger }}>{error}</Typography>}
         </Box>
@@ -155,7 +159,7 @@ const GmailConnectPanel = ({ status, onChanged, disabled }) => {
 // Gmail connection when available on the server, otherwise the app-password field (local/SMTP setups)
 const SendingAccountField = ({ gmailStatus, onGmailChanged, value, onChange, disabled, senderEmail }) => (
     gmailStatus?.configured
-        ? <GmailConnectPanel status={gmailStatus} onChanged={onGmailChanged} disabled={disabled} />
+        ? <GmailConnectPanel status={gmailStatus} onChanged={onGmailChanged} disabled={disabled} accountEmail={senderEmail} />
         : <GmailAppPasswordField value={value} onChange={onChange} disabled={disabled} senderEmail={senderEmail} />
 );
 
